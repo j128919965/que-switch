@@ -152,10 +152,10 @@ import SwitchCore
     private var performance: some View {
         Form {
             Section("预览更新") {
-                Toggle("停留时动态更新选中的窗口", isOn: $store.value.livePreview)
-                integerSlider("动态预览帧率", value: $store.value.previewFPS, range: 1...30, step: 1, suffix: "fps")
-                    .disabled(!store.value.livePreview)
-                Text("每次打开面板都会刷新本页缩略图，仅选中的窗口持续更新。面板关闭后停止采集；不录音，不保存截图文件。")
+                Text("每次打开面板，可见窗口各截图一次；翻到新页面时补齐预览。同一轮切换中不重复截图，停留时不持续采集。")
+                    .font(.callout).foregroundStyle(.secondary)
+                Toggle("电池供电或低电量模式时降低预览分辨率", isOn: $store.value.energySavingPreviews)
+                Text("优先显示已有缩略图，截图在后台逐张更新。省电时使用 1 倍分辨率，降低像素处理开销；窗口内容仍完整居中显示。")
                     .font(.callout).foregroundStyle(.secondary)
             }
             Section("响应与内存") {

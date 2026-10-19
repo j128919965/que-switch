@@ -1,5 +1,6 @@
 import AppKit
 import SwitchCore
+import WindowPreviews
 
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let store = SettingsStore()
@@ -20,6 +21,7 @@ import SwitchCore
     private var screenObserver: NSObjectProtocol?
     private var paused = false
     private var lastFailure: String?
+    private var interactionActivity: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildStatusItem()
@@ -98,9 +100,12 @@ import SwitchCore
 
     private func begin(reverse: Bool) {
         guard !paused else { return }
+        if let old = interactionActivity { ProcessInfo.processInfo.endActivity(old) }
+        interactionActivity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
+            reason: "User is switching windows")
         let records = catalog.ordered(using: store.value)
         sessionDisplays = DisplayContext.current()
-        guard !records.isEmpty, let first = sessionDisplays.first else { keyboard.endSession(); return }
+        guard !records.isEmpty, let first = sessionDisplays.first else { cancel(); return }
         let geometry = sessionDisplays.map(\.geometry)
         let assignments = records.map { DisplayWindow(key: $0.key, displayID: DisplayGeometry.owner(of: $0.frame, displays: geometry) ?? first.id) }
         let pointer = sessionDisplays.first { $0.screen.frame.contains(NSEvent.mouseLocation) }?.id ?? first.id
@@ -179,8 +184,10 @@ import SwitchCore
         if session.mode == .perScreen { screenPanels.values.forEach { $0.present(animated: store.value.animate) } }
         else { panel.present(animated: store.value.animate) }
         let selected = session.selected.flatMap { sessionRecords[$0] }
-        let scale = session.mode == .perScreen ? sessionDisplays.map { $0.screen.backingScaleFactor }.max() ?? screen.backingScaleFactor : screen.backingScaleFactor
-        previews.begin(records: result.visible, selected: selected, preferences: store.value,
+        let backingScale = session.mode == .perScreen ? sessionDisplays.map { $0.screen.backingScaleFactor }.max() ?? screen.backingScaleFactor : screen.backingScaleFactor
+        let scale = PreviewBudget(backingScale: backingScale, onBattery: PowerState.onBattery,
+            lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled, saveEnergy: store.value.energySavingPreviews).pixelScale
+        previews.begin(records: result.visible.map(\.snapshot), selected: selected?.snapshot, preferences: store.value,
                        pixelSize: CGSize(width: store.value.cardWidth * scale,
                                          height: store.value.cardWidth * 0.61 * scale)) { [weak self] key, image, status in
             guard let self, self.session != nil, self.presentations[key] != nil else { return }
@@ -194,8 +201,7 @@ import SwitchCore
         guard let session else { return }
         let result = renderPanels()
         if result.changed { preparePresentations(for: result.visible) }
-        previews.select(session.selected.flatMap { sessionRecords[$0] })
-        if result.changed { previews.refresh(result.visible) }
+        previews.updateVisible(result.visible.map(\.snapshot), selected: session.selected.flatMap { sessionRecords[$0]?.snapshot })
     }
 
     private func preparePresentations(for visible: [WindowRecord]) {
@@ -212,8 +218,11 @@ import SwitchCore
 
     private func commit() {
         guard let key = session?.selected, let record = sessionRecords[key] else { cancel(); return }
+        let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
+            reason: "Activate selected window")
         cancel()
         catalog.activate(record) { [weak self] success in
+            defer { ProcessInfo.processInfo.endActivity(activity) }
             guard let self else { return }
             if success { self.catalog.touch(key); self.lastFailure = nil }
             else { self.lastFailure = "未能选中这个窗口，请检查辅助功能权限，或等待该应用恢复响应。"; NSSound.beep() }
@@ -223,13 +232,17 @@ import SwitchCore
 
     private func closeWindow(_ key: WindowKey) {
         guard let record = sessionRecords[key] else { return }
+        let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
+            reason: "Close selected window")
         // Dismiss before closing so an application's unsaved-document dialog
         // remains visible and receives the user's attention.
         cancel()
         catalog.activate(record) { [weak self] _ in
-            self?.catalog.close(record) { success in
+            guard let self else { ProcessInfo.processInfo.endActivity(activity); return }
+            self.catalog.close(record) { success in
+                defer { ProcessInfo.processInfo.endActivity(activity) }
                 if !success { NSSound.beep() }
-                self?.catalog.refresh()
+                self.catalog.refresh()
             }
         }
     }
@@ -242,6 +255,7 @@ import SwitchCore
         screenPanels.values.forEach { $0.dismiss(); $0.reset(); $0.close() }; screenPanels.removeAll()
         sessionDisplays = []
         sessionRecords.removeAll(); presentations.removeAll(); sessionScreen = nil
+        if let activity = interactionActivity { ProcessInfo.processInfo.endActivity(activity); interactionActivity = nil }
     }
 
     private func buildStatusItem() {
@@ -275,7 +289,7 @@ import SwitchCore
     @objc private func clearCache() { previews.clearCache() }
     @objc private func about() {
         NSApp.orderFrontStandardAboutPanel(options: [
-            .applicationName: "NativeSwitch", .applicationVersion: "0.2.0",
+            .applicationName: "NativeSwitch", .applicationVersion: "0.3.0",
             .credits: NSAttributedString(string: "原生 macOS 窗口切换器\nSwift · AppKit · ScreenCaptureKit\n窗口截图仅在本机内存中处理。")
         ])
         NSApp.activate(ignoringOtherApps: true)

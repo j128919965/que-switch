@@ -22,8 +22,7 @@ public struct Preferences: Codable, Equatable {
     public var animate: Bool = true
     public var hoverSelect: Bool = false
     public var showDelayMilliseconds: Int = 100
-    public var livePreview: Bool = true
-    public var previewFPS: Int = 10
+    public var energySavingPreviews: Bool = true
     public var cacheMegabytes: Int = 48
     public var includeMinimized: Bool = false
     public var includeHidden: Bool = false
@@ -39,7 +38,6 @@ public struct Preferences: Codable, Equatable {
         columns = min(6, max(1, columns))
         cornerRadius = min(20, max(4, cornerRadius))
         showDelayMilliseconds = min(500, max(0, showDelayMilliseconds))
-        previewFPS = min(30, max(1, previewFPS))
         cacheMegabytes = min(256, max(8, cacheMegabytes))
         shortcutKey = [48, 50].contains(shortcutKey) ? shortcutKey : 48
         accentHex = accentHex.replacingOccurrences(of: "#", with: "")

@@ -7,7 +7,7 @@ struct PreviewPresentation {
 }
 
 private final class WindowCard: NSView {
-    let record: WindowRecord
+    private(set) var record: WindowRecord
     private let appIcon = NSImageView()
     private let title = NSTextField(labelWithString: "")
     private let preview = NSImageView()
@@ -18,8 +18,11 @@ private final class WindowCard: NSView {
     var onHover: (() -> Void)?
     var onClose: (() -> Void)?
     private var tracking: NSTrackingArea?
-    var selected = false { didSet { updateColors() } }
-    var active = true { didSet { updateColors() } }
+    var selected = false { didSet { if selected != oldValue { updateColors() } } }
+    var active = true { didSet { if active != oldValue { updateColors() } } }
+    private var displayedImage: CGImage?
+    private var displayedStatus: String?
+    private var hasPreview = false
     private let preferences: Preferences
 
     init(record: WindowRecord, preferences: Preferences, frame: NSRect) {
@@ -62,11 +65,24 @@ private final class WindowCard: NSView {
         badge.frame = NSRect(x: max(12, bounds.width - badge.frame.width - 22), y: 15, width: min(bounds.width - 28, badge.frame.width + 10), height: 19)
     }
     func setPreview(_ presentation: PreviewPresentation) {
-        preview.image = presentation.image.map { NSImage(cgImage: $0, size: .zero) }
-        placeholder.isHidden = presentation.image != nil
+        guard !hasPreview || displayedImage !== presentation.image || displayedStatus != presentation.status else { return }
+        if !hasPreview || displayedImage !== presentation.image {
+            preview.image = presentation.image.map { NSImage(cgImage: $0, size: .zero) }
+            placeholder.isHidden = presentation.image != nil
+        }
+        displayedImage = presentation.image; displayedStatus = presentation.status; hasPreview = true
         badge.stringValue = presentation.status ?? ""
         badge.isHidden = presentation.status == nil
         needsLayout = true
+    }
+    func updateRecord(_ record: WindowRecord) {
+        let changed = self.record.title != record.title || self.record.minimized != record.minimized || self.record.appName != record.appName
+        self.record = record
+        guard changed else { return }
+        title.stringValue = preferences.showTitles ? record.title : record.appName
+        title.toolTip = "\(record.appName) — \(record.title)"
+        closeButton.setAccessibilityLabel("关闭 \(record.title)")
+        setAccessibilityLabel("\(record.appName)，\(record.title)\(record.minimized ? "，已最小化" : "")")
     }
     private func updateColors() {
         let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
@@ -112,7 +128,6 @@ final class SwitcherPanel: NSPanel {
     private var groupLabels: [NSTextField] = []
     private var cards: [WindowKey: WindowCard] = [:]
     private var pageKeys: [WindowKey] = []
-    private var pageContent: [String] = []
     private var pageHeaders: [String] = []
     private(set) var columns = 1
     private var pageCapacity = 1
@@ -145,7 +160,7 @@ final class SwitcherPanel: NSPanel {
     }
 
     func reset() {
-        pageKeys = []; pageContent = []; pageHeaders = []
+        pageKeys = []; pageHeaders = []
         cards.values.forEach { $0.removeFromSuperview() }; cards.removeAll()
         groupLabels.forEach { $0.removeFromSuperview() }; groupLabels.removeAll()
     }
@@ -204,15 +219,18 @@ final class SwitcherPanel: NSPanel {
         let contentHeight = pages.map { $0.reduce(CGFloat(0)) { $0 + $1.height } + CGFloat(max(0, $0.count - 1)) * gap }.max() ?? 100
         let height = padding * 2 + contentHeight + footerHeight + captionHeight
         let panelFrame = NSRect(x: visibleFrame.midX - width / 2, y: visibleFrame.midY - height / 2 + 18, width: width, height: height)
-        let contentSignature = shown.map { "\($0.title)|\($0.minimized)|\($0.hidden)" }
         let headers = visibleRows.compactMap(\.title)
-        let changed = shown.map(\.key) != pageKeys || contentSignature != pageContent || headers != pageHeaders || frame.size != panelFrame.size
-        setFrame(panelFrame, display: false)
-        backdrop.frame = NSRect(origin: .zero, size: panelFrame.size); surface.frame = backdrop.bounds
+        let changed = shown.map(\.key) != pageKeys || headers != pageHeaders || frame.size != panelFrame.size
+        if frame != panelFrame { setFrame(panelFrame, display: false) }
+        let contentFrame = NSRect(origin: .zero, size: panelFrame.size)
+        if backdrop.frame != contentFrame { backdrop.frame = contentFrame }
+        if surface.frame != backdrop.bounds { surface.frame = backdrop.bounds }
         let blur = preferences.useBlur && !NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
-        backdrop.state = blur ? .active : .inactive
+        let effectState: NSVisualEffectView.State = blur ? .active : .inactive
+        if backdrop.state != effectState { backdrop.state = effectState }
         let dark = backdrop.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        surface.layer?.backgroundColor = NSColor(hex: dark ? "252832" : "E8EBF1").withAlphaComponent(blur ? 0.85 : 1).cgColor
+        let background = NSColor(hex: dark ? "252832" : "E8EBF1").withAlphaComponent(blur ? 0.85 : 1).cgColor
+        if surface.layer?.backgroundColor != background { surface.layer?.backgroundColor = background }
         let muted = NSColor(hex: dark ? "AEB5C6" : "626978")
         footer.textColor = muted; keysHint.textColor = muted; emptyLabel.textColor = muted
         captionLabel.textColor = active ? NSColor(hex: preferences.accentHex) : muted
@@ -226,7 +244,6 @@ final class SwitcherPanel: NSPanel {
             cards.values.forEach { $0.removeFromSuperview() }; cards.removeAll()
             groupLabels.forEach { $0.removeFromSuperview() }; groupLabels.removeAll()
             pageKeys = shown.map(\.key)
-            pageContent = contentSignature
             pageHeaders = headers
             var top = height - padding - captionHeight
             for row in visibleRows {
@@ -249,6 +266,7 @@ final class SwitcherPanel: NSPanel {
             }
         }
         for record in shown {
+            cards[record.key]?.updateRecord(record)
             cards[record.key]?.active = active
             cards[record.key]?.selected = record.key == selected
             cards[record.key]?.setPreview(previews[record.key] ?? PreviewPresentation(image: nil, status: "正在刷新…"))

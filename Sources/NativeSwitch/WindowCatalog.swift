@@ -1,8 +1,10 @@
 import AppKit
 import ApplicationServices
 import SwitchCore
+import WindowPreviews
 
 struct WindowRecord {
+    var snapshot: SnapshotWindow { SnapshotWindow(key: key, windowID: windowID, minimized: minimized) }
     let key: WindowKey
     let windowID: CGWindowID?
     let pid: pid_t
@@ -192,10 +194,12 @@ final class WindowCatalog {
     }
 
     func activate(_ record: WindowRecord, completion: @escaping (Bool) -> Void) {
+        // Bring the app forward immediately. Slow AX messaging must not delay
+        // this first visible response or wait for an unrelated catalog scan.
+        guard let app = NSRunningApplication(processIdentifier: record.pid), !app.isTerminated else { completion(false); return }
+        if app.isHidden { app.unhide() }
+        app.activate(options: [])
         actionQueue.async {
-            guard let app = NSRunningApplication(processIdentifier: record.pid), !app.isTerminated else {
-                DispatchQueue.main.async { completion(false) }; return
-            }
             let root = AXUIElementCreateApplication(record.pid)
             AXUIElementSetMessagingTimeout(root, 0.2)
             var window = record.accessibilityElement
@@ -206,17 +210,12 @@ final class WindowCatalog {
                 if candidates.count == 1 { window = candidates[0] }
             }
             guard let window else { DispatchQueue.main.async { completion(false) }; return }
-            AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
-            DispatchQueue.main.async {
-                if app.isHidden { app.unhide() }
-                app.activate(options: [])
-                self.actionQueue.async {
-                    let raised = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-                    AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
-                    AXUIElementSetAttributeValue(root, kAXFocusedWindowAttribute as CFString, window)
-                    DispatchQueue.main.async { completion(raised == .success) }
-                }
-            }
+            AXUIElementSetMessagingTimeout(window, 0.2)
+            if record.minimized { AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse) }
+            let raised = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+            AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+            AXUIElementSetAttributeValue(root, kAXFocusedWindowAttribute as CFString, window)
+            DispatchQueue.main.async { completion(raised == .success) }
         }
     }
 

@@ -4,6 +4,7 @@ import CoreMedia
 import CoreVideo
 import ScreenCaptureKit
 import SwitchCore
+import WindowPreviews
 
 @main struct NativeSwitchApp {
     @MainActor static func main() {
@@ -100,6 +101,28 @@ import SwitchCore
         let caption = CommandLine.arguments.contains("--per-screen") ? "屏幕 1 · 内建显示器" : nil
         panel.update(records: records, selected: records[1].key, preferences: preferences, previews: previews,
                      screen: screen, groups: groups, caption: caption, active: !CommandLine.arguments.contains("--inactive"))
+        if CommandLine.arguments.contains("--check-panel-updates") {
+            let updated = records.map { record in
+                WindowRecord(key: record.key, windowID: record.windowID, pid: record.pid, appName: record.appName,
+                    bundleID: record.bundleID, title: record.title + " · 已更新", frame: record.frame,
+                    minimized: record.minimized, hidden: record.hidden, onDesktop: record.onDesktop,
+                    accessibilityElement: record.accessibilityElement, icon: record.icon)
+            }
+            let lookup = Dictionary(uniqueKeysWithValues: updated.map { ($0.key, $0) })
+            let updatedGroups = groups.map { group in
+                WindowPanelGroup(displayID: group.displayID, title: group.title, records: group.records.compactMap { lookup[$0.key] })
+            }
+            let started = ProcessInfo.processInfo.systemUptime
+            for index in 0..<240 {
+                let result = panel.update(records: updated, selected: updated[index % 2].key, preferences: preferences,
+                    previews: previews, screen: screen, groups: updatedGroups, caption: caption,
+                    active: !CommandLine.arguments.contains("--inactive"))
+                guard !result.changed else { throw CocoaError(.coderInvalidValue) }
+            }
+            print("PASS: 240 selection/metadata updates reused existing cards (\(Int((ProcessInfo.processInfo.systemUptime - started) * 1000)) ms total)")
+            panel.update(records: records, selected: records[1].key, preferences: preferences, previews: previews,
+                screen: screen, groups: groups, caption: caption, active: !CommandLine.arguments.contains("--inactive"))
+        }
         guard let view = panel.contentView else { throw CocoaError(.featureUnsupported) }
         view.layoutSubtreeIfNeeded()
         guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw CocoaError(.featureUnsupported) }
@@ -109,7 +132,7 @@ import SwitchCore
         print("Rendered \(url.path)")
     }
 
-    /// Exercise the same CMSampleBuffer-to-bitmap path used by both capture
+    /// Exercise the same CMSampleBuffer-to-bitmap path used by screenshot
     /// modes, with a Retina portrait image and deliberately left-hand padding.
     private static func portraitFixture() throws -> CGImage {
         var buffer: CVPixelBuffer?

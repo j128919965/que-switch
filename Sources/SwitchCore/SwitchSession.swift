@@ -45,17 +45,13 @@ public struct SwitchSession {
     }
 }
 
-/// A capture can finish after Command is released or after another card is
-/// selected. Both session and selection must still match before using it.
+/// A screenshot may finish after Command is released. Only results from the
+/// active invocation can enter the cache or update its cards.
 public struct CaptureEpoch {
     public private(set) var session: UInt64 = 0
-    public private(set) var selection: UInt64 = 0
     public private(set) var active = false
     public init() {}
-    public mutating func begin() { session += 1; selection += 1; active = true }
-    public mutating func select() { selection += 1 }
-    public mutating func end() { active = false; session += 1; selection += 1 }
-    public func accepts(session: UInt64, selection: UInt64? = nil) -> Bool {
-        active && self.session == session && (selection == nil || self.selection == selection)
-    }
+    public mutating func begin() { session += 1; active = true }
+    public mutating func end() { active = false; session += 1 }
+    public func accepts(session: UInt64) -> Bool { active && self.session == session }
 }

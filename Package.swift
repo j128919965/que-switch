@@ -7,7 +7,9 @@ let package = Package(
     products: [.executable(name: "NativeSwitch", targets: ["NativeSwitch"])],
     targets: [
         .target(name: "SwitchCore"),
-        .executableTarget(name: "NativeSwitch", dependencies: ["SwitchCore"]),
-        .executableTarget(name: "CoreChecks", dependencies: ["SwitchCore"], path: "Tests/SwitchCoreTests")
+        .target(name: "WindowPreviews", dependencies: ["SwitchCore"]),
+        .executableTarget(name: "NativeSwitch", dependencies: ["SwitchCore", "WindowPreviews"]),
+        .executableTarget(name: "CoreChecks", dependencies: ["SwitchCore"], path: "Tests/SwitchCoreTests"),
+        .executableTarget(name: "PreviewChecks", dependencies: ["SwitchCore", "WindowPreviews"], path: "Tests/WindowPreviewsTests")
     ]
 )
