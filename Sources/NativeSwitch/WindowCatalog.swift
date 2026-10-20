@@ -49,12 +49,25 @@ final class WindowCatalog {
                 self.refresh()
             })
         }
+        // Our settings window belongs to an accessory app, so the regular-app
+        // AX scan intentionally excludes it. Follow its native lifecycle instead.
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.willCloseNotification,
+                     NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification,
+                     NSWindow.didMoveNotification, NSWindow.didResizeNotification, NSWindow.didChangeScreenNotification] {
+            notificationTokens.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
+                guard notification.object is SettingsWindow else { return }
+                // willClose arrives before isVisible changes.
+                DispatchQueue.main.async { self?.refresh() }
+            })
+        }
         refresh()
     }
 
     func refresh() {
         pending?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.scan() }
+        let local = localWindowRecords()
+        let focused = NSApp.keyWindow.flatMap { window in local.first { $0.windowID == CGWindowID(window.windowNumber) }?.key }
+        let work = DispatchWorkItem { [weak self] in self?.scan(localWindows: local, localFocus: focused) }
         pending = work
         queue.asyncAfter(deadline: .now() + .milliseconds(40), execute: work)
     }
@@ -71,6 +84,27 @@ final class WindowCatalog {
     }
 
     func touch(_ key: WindowKey) { recency.touch(key); lastFocused = key }
+
+    private func localWindowRecords() -> [WindowRecord] {
+        let primaryTop = NSScreen.screens.first?.frame.maxY ?? 0
+        let pid = ProcessInfo.processInfo.processIdentifier
+        return NSApp.windows.compactMap { window in
+            guard window is SettingsWindow, window.isVisible || window.isMiniaturized, window.windowNumber > 0 else { return nil }
+            let id = CGWindowID(window.windowNumber)
+            return WindowRecord(key: WindowKey(pid: pid, token: String(id)), windowID: id, pid: pid,
+                appName: "NativeSwitch", bundleID: Bundle.main.bundleIdentifier ?? "com.que.NativeSwitch", title: window.title,
+                frame: DisplayGeometry.quartzFrame(appKitFrame: window.frame, primaryTop: primaryTop),
+                minimized: window.isMiniaturized, hidden: NSApp.isHidden, onDesktop: window.isOnActiveSpace,
+                accessibilityElement: nil, icon: NSApp.applicationIconImage)
+        }
+    }
+
+    private func localWindow(for record: WindowRecord) -> NSWindow? {
+        guard record.pid == ProcessInfo.processInfo.processIdentifier, let id = record.windowID,
+              let window = NSApp.window(withWindowNumber: Int(id)), window is SettingsWindow,
+              window.isVisible || window.isMiniaturized else { return nil }
+        return window
+    }
 
     private func installObserver(for pid: pid_t, app: AXUIElement) {
         guard observers[pid] == nil else { return }
@@ -101,7 +135,7 @@ final class WindowCatalog {
         }
     }
 
-    private func scan() {
+    private func scan(localWindows: [WindowRecord], localFocus: WindowKey?) {
         let ownPID = ProcessInfo.processInfo.processIdentifier
         let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular && $0.processIdentifier != ownPID }
         let livePIDs = Set(apps.map(\.processIdentifier))
@@ -118,8 +152,8 @@ final class WindowCatalog {
         }, uniquingKeysWith: min)
         let trusted = AXIsProcessTrusted()
         let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        var output: [WindowRecord] = []
-        var focusedKey: WindowKey?
+        var output: [WindowRecord] = localWindows
+        var focusedKey: WindowKey? = frontPID == ownPID ? localFocus : nil
         for application in apps {
             let pid = application.processIdentifier
             let app = AXUIElementCreateApplication(pid)
@@ -194,6 +228,13 @@ final class WindowCatalog {
     }
 
     func activate(_ record: WindowRecord, completion: @escaping (Bool) -> Void) {
+        if record.pid == ProcessInfo.processInfo.processIdentifier {
+            guard let window = localWindow(for: record) else { completion(false); return }
+            if window.isMiniaturized { window.deminiaturize(nil) }
+            if NSApp.isHidden { NSApp.unhide(nil) }
+            window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+            completion(true); return
+        }
         // Bring the app forward immediately. Slow AX messaging must not delay
         // this first visible response or wait for an unrelated catalog scan.
         guard let app = NSRunningApplication(processIdentifier: record.pid), !app.isTerminated else { completion(false); return }
@@ -220,6 +261,11 @@ final class WindowCatalog {
     }
 
     func close(_ record: WindowRecord, completion: @escaping (Bool) -> Void) {
+        if record.pid == ProcessInfo.processInfo.processIdentifier {
+            guard let window = localWindow(for: record) else { completion(false); return }
+            window.performClose(nil)
+            completion(!window.isVisible && !window.isMiniaturized); return
+        }
         actionQueue.async {
             guard let window = record.accessibilityElement,
                   let close = axValue(window, kAXCloseButtonAttribute as CFString), CFGetTypeID(close) == AXUIElementGetTypeID() else {

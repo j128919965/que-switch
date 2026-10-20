@@ -289,7 +289,7 @@ import WindowPreviews
     @objc private func clearCache() { previews.clearCache() }
     @objc private func about() {
         NSApp.orderFrontStandardAboutPanel(options: [
-            .applicationName: "NativeSwitch", .applicationVersion: "0.3.0",
+            .applicationName: "NativeSwitch", .applicationVersion: "0.3.1",
             .credits: NSAttributedString(string: "原生 macOS 窗口切换器\nSwift · AppKit · ScreenCaptureKit\n窗口截图仅在本机内存中处理。")
         ])
         NSApp.activate(ignoringOtherApps: true)

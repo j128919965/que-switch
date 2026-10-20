@@ -4,6 +4,17 @@ import ServiceManagement
 import UniformTypeIdentifiers
 import SwitchCore
 
+final class SettingsWindow: NSWindow {
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        if modifiers == .command, event.charactersIgnoringModifiers?.lowercased() == "w" {
+            performClose(nil)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
 @MainActor final class SettingsWindowController {
     private var window: NSWindow?
     private let store: SettingsStore
@@ -17,7 +28,7 @@ import SwitchCore
             window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return
         }
         let view = SettingsView(store: store, initialTab: permissions ? "permissions" : "general", onCheck: { [weak self] in self?.onCheckPermissions?() })
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 710, height: 590),
+        let window = SettingsWindow(contentRect: NSRect(x: 0, y: 0, width: 710, height: 590),
                               styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
         window.title = "NativeSwitch 设置"; window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: view)
