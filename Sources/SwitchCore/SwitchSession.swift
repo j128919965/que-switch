@@ -10,9 +10,23 @@ public struct WindowKey: Hashable, Codable, CustomStringConvertible {
 public struct RecencyOrder {
     private var sequence: UInt64 = 0
     private var timestamps: [WindowKey: UInt64] = [:]
+    public private(set) var focused: WindowKey?
     public init() {}
-    public mutating func touch(_ key: WindowKey) { sequence += 1; timestamps[key] = sequence }
-    public mutating func prune(keeping keys: Set<WindowKey>) { timestamps = timestamps.filter { keys.contains($0.key) } }
+    public mutating func touch(_ key: WindowKey) { sequence += 1; timestamps[key] = sequence; focused = key }
+    public mutating func observe(frontmostPID: Int32?, frontToBack: [WindowKey], known: Set<WindowKey>) {
+        // A stale window from another app may still lead a cached list. Only
+        // the foreground app can supply the current window. If its front
+        // window isn't known yet, don't mistake another of its windows for it.
+        let front = frontmostPID.flatMap { pid in frontToBack.first { $0.pid == pid } }
+        let next = front.flatMap { known.contains($0) ? $0 : nil }
+        guard next != focused else { return }
+        focused = next
+        if let next { touch(next) }
+    }
+    public mutating func prune(keeping keys: Set<WindowKey>) {
+        timestamps = timestamps.filter { keys.contains($0.key) }
+        if let focused, !keys.contains(focused) { self.focused = nil }
+    }
     public func ordered(_ frontToBack: [WindowKey]) -> [WindowKey] {
         let positions = Dictionary(frontToBack.enumerated().map { ($0.element, $0.offset) }, uniquingKeysWith: min)
         return Array(Set(frontToBack)).sorted {

@@ -18,7 +18,7 @@ public struct WorkspaceSession {
     private var local: [UInt32: SwitchSession]
 
     public init(windows: [DisplayWindow], displayOrder: [UInt32], pointerDisplay: UInt32,
-                mode: MultiDisplayMode, reverse: Bool = false) {
+                mode: MultiDisplayMode, reverse: Bool = false, currentWindow: WindowKey? = nil) {
         self.mode = mode; activeDisplay = pointerDisplay
         self.displayOrder = displayOrder
         membership = Dictionary(windows.map { ($0.key, $0.displayID) }, uniquingKeysWith: { first, _ in first })
@@ -26,16 +26,16 @@ public struct WorkspaceSession {
             ? displayOrder.flatMap { id in windows.filter { $0.displayID == id }.map(\.key) }
             : windows.map(\.key)
         global = SwitchSession(keys: ordered, reverse: reverse)
-        // Grouping changes presentation/cycling order, but the initial target
-        // still follows global MRU, as it does in the default mode.
-        if mode == .grouped, !windows.isEmpty {
-            global.select(windows[reverse ? windows.count - 1 : min(1, windows.count - 1)].key)
-        }
+        // Skip the actual current window, not an assumed first item. When the
+        // foreground window is excluded or on another display, select the
+        // first eligible MRU window rather than skipping it too.
+        let keys = windows.map(\.key)
+        if let target = reverse ? keys.last : (keys.first { $0 != currentWindow } ?? keys.first) { global.select(target) }
         local = [:]
         for id in displayOrder {
             let keys = windows.filter { $0.displayID == id }.map(\.key)
             var session = SwitchSession(keys: keys, reverse: reverse)
-            if windows.first?.displayID != id, let first = reverse ? keys.last : keys.first { session.select(first) }
+            if let target = reverse ? keys.last : (keys.first { $0 != currentWindow } ?? keys.first) { session.select(target) }
             local[id] = session
         }
     }

@@ -103,6 +103,7 @@ import WindowPreviews
         if let old = interactionActivity { ProcessInfo.processInfo.endActivity(old) }
         interactionActivity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
             reason: "User is switching windows")
+        catalog.synchronizeFocus()
         let records = catalog.ordered(using: store.value)
         sessionDisplays = DisplayContext.current()
         guard !records.isEmpty, let first = sessionDisplays.first else { cancel(); return }
@@ -110,7 +111,8 @@ import WindowPreviews
         let assignments = records.map { DisplayWindow(key: $0.key, displayID: DisplayGeometry.owner(of: $0.frame, displays: geometry) ?? first.id) }
         let pointer = sessionDisplays.first { $0.screen.frame.contains(NSEvent.mouseLocation) }?.id ?? first.id
         session = WorkspaceSession(windows: assignments, displayOrder: sessionDisplays.map(\.id),
-                                   pointerDisplay: pointer, mode: store.value.multiDisplayMode, reverse: reverse)
+                                   pointerDisplay: pointer, mode: store.value.multiDisplayMode, reverse: reverse,
+                                   currentWindow: catalog.focusedWindow)
         sessionRecords = Dictionary(records.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
         presentations = [:]
         sessionScreen = chosenScreen(records: records)
@@ -224,7 +226,7 @@ import WindowPreviews
         catalog.activate(record) { [weak self] success in
             defer { ProcessInfo.processInfo.endActivity(activity) }
             guard let self else { return }
-            if success { self.catalog.touch(key); self.lastFailure = nil }
+            if success { self.catalog.synchronizeFocus(); self.lastFailure = nil }
             else { self.lastFailure = "未能选中这个窗口，请检查辅助功能权限，或等待该应用恢复响应。"; NSSound.beep() }
             self.catalog.refresh()
         }
@@ -289,7 +291,7 @@ import WindowPreviews
     @objc private func clearCache() { previews.clearCache() }
     @objc private func about() {
         NSApp.orderFrontStandardAboutPanel(options: [
-            .applicationName: "NativeSwitch", .applicationVersion: "0.3.1",
+            .applicationName: "NativeSwitch", .applicationVersion: "0.3.2",
             .credits: NSAttributedString(string: "原生 macOS 窗口切换器\nSwift · AppKit · ScreenCaptureKit\n窗口截图仅在本机内存中处理。")
         ])
         NSApp.activate(ignoringOtherApps: true)

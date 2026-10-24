@@ -20,7 +20,7 @@ struct WindowRecord {
 }
 
 /// Window metadata is collected on a serial queue. Only lightweight cached
-/// records are read when the global shortcut arrives.
+/// records plus one WindowServer metadata snapshot resolve focus at invocation.
 final class WindowCatalog {
     private let queue = DispatchQueue(label: "com.que.NativeSwitch.catalog", qos: .userInitiated)
     private let actionQueue = DispatchQueue(label: "com.que.NativeSwitch.activate", qos: .userInteractive)
@@ -32,7 +32,6 @@ final class WindowCatalog {
     private var knownDesktop: [WindowKey: UInt64] = [:]
     private var notificationTokens: [NSObjectProtocol] = []
     private var recency = RecencyOrder() // main thread only
-    private var lastFocused: WindowKey?
     private(set) var records: [WindowRecord] = [] // main thread only
     var onChange: (([WindowRecord]) -> Void)?
 
@@ -46,6 +45,7 @@ final class WindowCatalog {
                 if name == NSWorkspace.activeSpaceDidChangeNotification {
                     self.queue.async { self.desktopGeneration += 1 }
                 }
+                if name == NSWorkspace.didActivateApplicationNotification { self.synchronizeFocus() }
                 self.refresh()
             })
         }
@@ -57,7 +57,10 @@ final class WindowCatalog {
             notificationTokens.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
                 guard notification.object is SettingsWindow else { return }
                 // willClose arrives before isVisible changes.
-                DispatchQueue.main.async { self?.refresh() }
+                DispatchQueue.main.async {
+                    if name == NSWindow.didBecomeKeyNotification { self?.synchronizeFocus() }
+                    self?.refresh()
+                }
             })
         }
         refresh()
@@ -66,8 +69,7 @@ final class WindowCatalog {
     func refresh() {
         pending?.cancel()
         let local = localWindowRecords()
-        let focused = NSApp.keyWindow.flatMap { window in local.first { $0.windowID == CGWindowID(window.windowNumber) }?.key }
-        let work = DispatchWorkItem { [weak self] in self?.scan(localWindows: local, localFocus: focused) }
+        let work = DispatchWorkItem { [weak self] in self?.scan(localWindows: local) }
         pending = work
         queue.asyncAfter(deadline: .now() + .milliseconds(40), execute: work)
     }
@@ -83,7 +85,30 @@ final class WindowCatalog {
         return recency.ordered(eligible.map(\.key)).compactMap { mapping[$0] }
     }
 
-    func touch(_ key: WindowKey) { recency.touch(key); lastFocused = key }
+    var focusedWindow: WindowKey? { recency.focused }
+
+    /// No AX IPC, screenshots, or full catalog scan on the input path. Resolve
+    /// the foreground app's front window by its WindowServer ID even when its
+    /// AX reference could not be matched during the last background scan.
+    func synchronizeFocus() {
+        let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let known = Set(records.map(\.key))
+        let lookup = Dictionary(records.compactMap { record in record.windowID.map {
+            (WindowKey(pid: record.pid, token: String($0)), record.key)
+        } }, uniquingKeysWith: { first, _ in first })
+        let raw = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        let frontToBack = raw.compactMap { item -> WindowKey? in
+            guard let owner = (item[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value, owner == pid,
+                  (item[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
+                  (item[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1 > 0,
+                  let id = (item[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
+                  let bounds = item[kCGWindowBounds as String] as? NSDictionary,
+                  let frame = CGRect(dictionaryRepresentation: bounds), frame.width >= 50, frame.height >= 40 else { return nil }
+            let key = WindowKey(pid: owner, token: String(id))
+            return lookup[key] ?? key
+        }
+        recency.observe(frontmostPID: pid, frontToBack: frontToBack, known: known)
+    }
 
     private func localWindowRecords() -> [WindowRecord] {
         let primaryTop = NSScreen.screens.first?.frame.maxY ?? 0
@@ -109,10 +134,15 @@ final class WindowCatalog {
     private func installObserver(for pid: pid_t, app: AXUIElement) {
         guard observers[pid] == nil else { return }
         var observer: AXObserver?
-        let callback: AXObserverCallback = { _, _, _, context in
+        let callback: AXObserverCallback = { _, _, notification, context in
             guard let context else { return }
             let catalog = Unmanaged<WindowCatalog>.fromOpaque(context).takeUnretainedValue()
-            DispatchQueue.main.async { catalog.refresh() }
+            DispatchQueue.main.async {
+                if notification as String == kAXFocusedWindowChangedNotification || notification as String == kAXApplicationActivatedNotification {
+                    catalog.synchronizeFocus()
+                }
+                catalog.refresh()
+            }
         }
         guard AXObserverCreate(pid, callback, &observer) == .success, let observer else { return }
         observers[pid] = observer
@@ -135,7 +165,7 @@ final class WindowCatalog {
         }
     }
 
-    private func scan(localWindows: [WindowRecord], localFocus: WindowKey?) {
+    private func scan(localWindows: [WindowRecord]) {
         let ownPID = ProcessInfo.processInfo.processIdentifier
         let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular && $0.processIdentifier != ownPID }
         let livePIDs = Set(apps.map(\.processIdentifier))
@@ -151,15 +181,12 @@ final class WindowCatalog {
             return (id, index)
         }, uniquingKeysWith: min)
         let trusted = AXIsProcessTrusted()
-        let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         var output: [WindowRecord] = localWindows
-        var focusedKey: WindowKey? = frontPID == ownPID ? localFocus : nil
         for application in apps {
             let pid = application.processIdentifier
             let app = AXUIElementCreateApplication(pid)
             AXUIElementSetMessagingTimeout(app, 0.12)
             let appWindows = trusted ? (axValue(app, kAXWindowsAttribute as CFString) as? [AXUIElement] ?? []) : []
-            let focused = pid == frontPID ? axValue(app, kAXFocusedWindowAttribute as CFString) : nil
             if trusted { installObserver(for: pid, app: app) }
             let cgWindows = raw.filter {
                 ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid &&
@@ -189,7 +216,6 @@ final class WindowCatalog {
                 let key = WindowKey(pid: pid, token: String(id))
                 if visibleIDs.contains(id) { knownDesktop[key] = desktopGeneration }
                 let element = match?.element.0
-                if let element, let focused, CFEqual(element, focused) { focusedKey = key }
                 output.append(WindowRecord(key: key, windowID: id, pid: pid,
                     appName: application.localizedName ?? "应用", bundleID: application.bundleIdentifier ?? "",
                     title: title.isEmpty ? (match?.element.1.isEmpty == false ? match!.element.1 : application.localizedName ?? "窗口") : title,
@@ -202,7 +228,6 @@ final class WindowCatalog {
                 observe(candidate.0, pid: pid)
                 let old = previous.first { $0.pid == pid && $0.accessibilityElement.map { CFEqual($0, candidate.0) } == true }
                 let key = old?.key ?? WindowKey(pid: pid, token: "ax-\(CFHash(candidate.0))")
-                if let focused, CFEqual(candidate.0, focused) { focusedKey = key }
                 // A minimized/hidden window has no public Space ID. Keep its
                 // last known desktop membership; unknown ones appear only in
                 // the all-desktops scope.
@@ -217,12 +242,14 @@ final class WindowCatalog {
         previous = output
         let retainedKeys = Set(output.map(\.key))
         knownDesktop = knownDesktop.filter { retainedKeys.contains($0.key) }
-        let result = output, focused = focusedKey
+        let result = output
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.records = result
             self.recency.prune(keeping: Set(result.map(\.key)))
-            if let focused, focused != self.lastFocused { self.recency.touch(focused); self.lastFocused = focused }
+            // Read focus now; a slow scan's earlier focus sample must never
+            // overwrite a newer foreground-window observation.
+            self.synchronizeFocus()
             self.onChange?(result)
         }
     }
