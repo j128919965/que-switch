@@ -172,7 +172,7 @@ dist/NativeSwitch.app/Contents/MacOS/NativeSwitch --render-demo preview-updates.
 
 0.3.1 的 Release 构建、本地签名和上述十四组检查均通过。用户已在本机重新授权后验证：设置窗口可用 Cmd+W 关闭；打开时能从 Cmd+Tab 列表切回，关闭后从列表消失。自身窗口通过 AppKit 直接激活和关闭，预览面板不参与自身列表。
 
-0.3.2 的 Release 构建、本地签名、十二组核心检查和四组预览集成检查均通过。已安装至 `/Applications/NativeSwitch.app`，两项权限已在应用界面确认生效。
+0.3.2 的 Release 构建、本地签名、十二组核心检查和四组预览集成检查均通过。已安装至 `/Applications/NativeSwitch.app`，两项权限已在应用界面确认生效。用户已手动验证：用鼠标聚焦其他应用后再聚焦 Edge，立即呼出时 Edge 排在所在屏幕列表第一位，首次 Tab 正确选中上一个窗口。
 
 继续扩大实机验收时，可以按以下步骤检查：
 
