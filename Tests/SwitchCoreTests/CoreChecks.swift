@@ -156,6 +156,50 @@ private func expect<T: Equatable>(_ actual: T, _ expected: T, _ reason: String) 
         try expect(frozen.keys, repaired, "Focus updates cannot reorder an invocation already being cycled")
         try expect(frozen.selected, edge, "Focus updates cannot move the current selection")
         print("PASS: focus-aware initial Tab target, display modes, excluded current windows and immutable sessions")
-        print("All 12 check groups passed.")
+        let browserFrame = CGRect(x: 0, y: 25, width: 1200, height: 850)
+        let findFrame = CGRect(x: 750, y: 110, width: 430, height: 60)
+        let smallFrame = CGRect(x: 100, y: 150, width: 300, height: 200)
+        let browserSurfaces: [WindowInventory.ServerWindow] = [
+            .init(title: "在页面上查找", frame: findFrame),
+            .init(title: "Edge page", frame: browserFrame),
+            .init(title: "在页面上查找", frame: smallFrame)
+        ]
+        let browserWindows: [WindowInventory.AccessibilityWindow] = [
+            .init(title: "Edge page", frame: browserFrame, role: "AXWindow", subrole: "AXStandardWindow"),
+            .init(title: "在页面上查找", frame: smallFrame, role: "AXWindow", subrole: "AXStandardWindow")
+        ]
+        let browserInventory = WindowInventory.reconcile(server: browserSurfaces, accessibility: browserWindows)
+        try expect(browserInventory, [.init(serverIndex: 1, accessibilityIndex: 0), .init(serverIndex: 2, accessibilityIndex: 1)],
+            "A CG-only find bar is excluded while both real Edge windows remain, even with the same title or a small frame")
+        let findWindow = WindowInventory.AccessibilityWindow(title: "在页面上查找", frame: findFrame,
+            role: "AXWindow", subrole: "AXStandardWindow", canBecomeMain: false)
+        let realWindows = browserWindows.map {
+            WindowInventory.AccessibilityWindow(title: $0.title, frame: $0.frame, role: $0.role, subrole: $0.subrole, canBecomeMain: true)
+        }
+        try expect(WindowInventory.reconcile(server: browserSurfaces, accessibility: realWindows + [findWindow]), browserInventory,
+            "Edge's find bar can also report AXStandardWindow; it cannot become main, whereas background browser windows can")
+        try expect(WindowInventory.reconcile(server: [], accessibility: [findWindow]), [],
+            "An AX-only child find bar must also be excluded")
+        try expect(WindowInventory.reconcile(server: browserSurfaces, accessibility: nil).count, 3,
+            "Missing AX permission or an unsuccessful query retains the WindowServer fallback")
+        try expect(WindowInventory.reconcile(server: browserSurfaces, accessibility: []).count, 0,
+            "An app reporting no top-level windows cannot contribute child surfaces")
+        print("PASS: child-surface exclusion, genuine small windows and unavailable AX fallback")
+
+        let dialogWindows: [WindowInventory.AccessibilityWindow] = [
+            .init(title: "Inspector", frame: browserFrame, role: "AXWindow", subrole: "AXFloatingWindow"),
+            .init(title: "Save", frame: smallFrame, role: "AXWindow", subrole: "AXDialog"),
+            .init(title: "Sheet", frame: smallFrame, role: "AXSheet", subrole: nil),
+            .init(title: "Hidden document", frame: findFrame, role: "AXWindow", subrole: "AXStandardWindow")
+        ]
+        try expect(WindowInventory.reconcile(server: [.init(title: "Inspector", frame: browserFrame), .init(title: "Save", frame: smallFrame)], accessibility: dialogWindows),
+            [.init(serverIndex: 1, accessibilityIndex: 1), .init(serverIndex: nil, accessibilityIndex: 3)],
+            "Floating surfaces and sheets are excluded on both paths; independent dialogs and AX-only hidden/minimized windows remain")
+        let ambiguous = [browserWindows[0], browserWindows[0]]
+        try expect(WindowInventory.reconcile(server: [.init(title: "Edge page", frame: browserFrame)], accessibility: ambiguous),
+            [.init(serverIndex: nil, accessibilityIndex: 0), .init(serverIndex: nil, accessibilityIndex: 1)],
+            "Ambiguous geometry must never associate a screenshot with an arbitrary AX activation target")
+        print("PASS: consistent AX eligibility, independent dialogs and ambiguous matches")
+        print("All 14 check groups passed.")
     }
 }

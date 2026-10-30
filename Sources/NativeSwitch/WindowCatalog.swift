@@ -32,6 +32,7 @@ final class WindowCatalog {
     private var knownDesktop: [WindowKey: UInt64] = [:]
     private var notificationTokens: [NSObjectProtocol] = []
     private var recency = RecencyOrder() // main thread only
+    private var auxiliaryWindows: Set<WindowKey> = [] // main thread only
     private(set) var records: [WindowRecord] = [] // main thread only
     var onChange: (([WindowRecord]) -> Void)?
 
@@ -105,6 +106,7 @@ final class WindowCatalog {
                   let bounds = item[kCGWindowBounds as String] as? NSDictionary,
                   let frame = CGRect(dictionaryRepresentation: bounds), frame.width >= 50, frame.height >= 40 else { return nil }
             let key = WindowKey(pid: owner, token: String(id))
+            guard !auxiliaryWindows.contains(key) else { return nil }
             return lookup[key] ?? key
         }
         recency.observe(frontmostPID: pid, frontToBack: frontToBack, known: known)
@@ -182,60 +184,65 @@ final class WindowCatalog {
         }, uniquingKeysWith: min)
         let trusted = AXIsProcessTrusted()
         var output: [WindowRecord] = localWindows
+        var auxiliary: Set<WindowKey> = []
         for application in apps {
             let pid = application.processIdentifier
             let app = AXUIElementCreateApplication(pid)
             AXUIElementSetMessagingTimeout(app, 0.12)
-            let appWindows = trusted ? (axValue(app, kAXWindowsAttribute as CFString) as? [AXUIElement] ?? []) : []
+            let appWindows = trusted ? axValue(app, kAXWindowsAttribute as CFString) as? [AXUIElement] : nil
             if trusted { installObserver(for: pid, app: app) }
             let cgWindows = raw.filter {
                 ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid &&
                 ($0[kCGWindowLayer as String] as? NSNumber)?.intValue == 0 &&
                 ($0[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1 > 0
             }
-            var usedAX: Set<Int> = []
-            let axInfo = appWindows.map { element in
-                (element, axValue(element, kAXTitleAttribute as CFString) as? String ?? "",
-                 axFrame(element), axValue(element, kAXMinimizedAttribute as CFString) as? Bool ?? false)
+            let axInfo = appWindows?.map { element in
+                (element: element, title: axValue(element, kAXTitleAttribute as CFString) as? String ?? "",
+                 frame: axFrame(element), minimized: axValue(element, kAXMinimizedAttribute as CFString) as? Bool ?? false,
+                 role: axValue(element, kAXRoleAttribute as CFString) as? String,
+                 subrole: axValue(element, kAXSubroleAttribute as CFString) as? String,
+                 canBecomeMain: axCanBecomeMain(element))
             }
-            for item in cgWindows {
+            let server = cgWindows.compactMap { item -> (id: CGWindowID, title: String, frame: CGRect)? in
                 guard let id = (item[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
                       let bounds = item[kCGWindowBounds as String] as? NSDictionary,
-                      let frame = CGRect(dictionaryRepresentation: bounds), frame.width >= 50, frame.height >= 40 else { continue }
-                let title = item[kCGWindowName as String] as? String ?? ""
-                let matches = axInfo.enumerated().filter { index, candidate in
-                    guard !usedAX.contains(index), let axBounds = candidate.2 else { return false }
-                    return abs(axBounds.minX - frame.minX) < 3 && abs(axBounds.minY - frame.minY) < 3 &&
-                        abs(axBounds.width - frame.width) < 3 && abs(axBounds.height - frame.height) < 3
-                }
-                let exact = matches.filter { $0.element.1 == title }
-                // Public Accessibility APIs expose no WindowServer ID. Avoid
-                // raising an arbitrary window when both title and bounds collide.
-                let match = exact.count == 1 ? exact.first : (matches.count == 1 ? matches.first : nil)
-                if let match { usedAX.insert(match.offset); observe(match.element.0, pid: pid) }
-                let key = WindowKey(pid: pid, token: String(id))
-                if visibleIDs.contains(id) { knownDesktop[key] = desktopGeneration }
-                let element = match?.element.0
-                output.append(WindowRecord(key: key, windowID: id, pid: pid,
-                    appName: application.localizedName ?? "应用", bundleID: application.bundleIdentifier ?? "",
-                    title: title.isEmpty ? (match?.element.1.isEmpty == false ? match!.element.1 : application.localizedName ?? "窗口") : title,
-                    frame: frame, minimized: match?.element.3 ?? false, hidden: application.isHidden,
-                    onDesktop: visibleIDs.contains(id), accessibilityElement: element, icon: application.icon))
+                      let frame = CGRect(dictionaryRepresentation: bounds) else { return nil }
+                return (id, item[kCGWindowName as String] as? String ?? "", frame)
             }
-            for (index, candidate) in axInfo.enumerated() where !usedAX.contains(index) {
-                guard let frame = candidate.2, frame.width >= 50, frame.height >= 40,
-                      (axValue(candidate.0, kAXSubroleAttribute as CFString) as? String) != kAXFloatingWindowSubrole else { continue }
-                observe(candidate.0, pid: pid)
-                let old = previous.first { $0.pid == pid && $0.accessibilityElement.map { CFEqual($0, candidate.0) } == true }
-                let key = old?.key ?? WindowKey(pid: pid, token: "ax-\(CFHash(candidate.0))")
+            let matches = WindowInventory.reconcile(server: server.map { .init(title: $0.title, frame: $0.frame) },
+                accessibility: axInfo?.map { .init(title: $0.title, frame: $0.frame, role: $0.role, subrole: $0.subrole,
+                    canBecomeMain: $0.canBecomeMain) })
+            if appWindows != nil {
+                let retained = Set(matches.compactMap(\.serverIndex))
+                for index in server.indices where !retained.contains(index) {
+                    auxiliary.insert(WindowKey(pid: pid, token: String(server[index].id)))
+                }
+            }
+            for match in matches {
+                let candidate = match.accessibilityIndex.flatMap { axInfo?[$0] }
+                if let candidate { observe(candidate.element, pid: pid) }
+                if let index = match.serverIndex {
+                    let window = server[index]
+                    let key = WindowKey(pid: pid, token: String(window.id))
+                    if visibleIDs.contains(window.id) { knownDesktop[key] = desktopGeneration }
+                    output.append(WindowRecord(key: key, windowID: window.id, pid: pid,
+                        appName: application.localizedName ?? "应用", bundleID: application.bundleIdentifier ?? "",
+                        title: window.title.isEmpty ? (candidate?.title.isEmpty == false ? candidate!.title : application.localizedName ?? "窗口") : window.title,
+                        frame: window.frame, minimized: candidate?.minimized ?? false, hidden: application.isHidden,
+                        onDesktop: visibleIDs.contains(window.id), accessibilityElement: candidate?.element, icon: application.icon))
+                    continue
+                }
+                guard let candidate, let frame = candidate.frame else { continue }
+                let old = previous.first { $0.pid == pid && $0.accessibilityElement.map { CFEqual($0, candidate.element) } == true }
+                let key = old?.key ?? WindowKey(pid: pid, token: "ax-\(CFHash(candidate.element))")
                 // A minimized/hidden window has no public Space ID. Keep its
                 // last known desktop membership; unknown ones appear only in
                 // the all-desktops scope.
                 output.append(WindowRecord(key: key, windowID: old?.windowID, pid: pid,
                     appName: application.localizedName ?? "应用", bundleID: application.bundleIdentifier ?? "",
-                    title: candidate.1.isEmpty ? application.localizedName ?? "窗口" : candidate.1,
-                    frame: frame, minimized: candidate.3, hidden: application.isHidden,
-                    onDesktop: knownDesktop[key] == desktopGeneration, accessibilityElement: candidate.0, icon: application.icon))
+                    title: candidate.title.isEmpty ? application.localizedName ?? "窗口" : candidate.title,
+                    frame: frame, minimized: candidate.minimized, hidden: application.isHidden,
+                    onDesktop: knownDesktop[key] == desktopGeneration, accessibilityElement: candidate.element, icon: application.icon))
             }
         }
         output.sort { (zOrder[$0.windowID ?? 0] ?? Int.max) < (zOrder[$1.windowID ?? 0] ?? Int.max) }
@@ -243,15 +250,26 @@ final class WindowCatalog {
         let retainedKeys = Set(output.map(\.key))
         knownDesktop = knownDesktop.filter { retainedKeys.contains($0.key) }
         let result = output
+        let excluded = auxiliary.subtracting(retainedKeys)
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.records = result
+            self.auxiliaryWindows = excluded
             self.recency.prune(keeping: Set(result.map(\.key)))
             // Read focus now; a slow scan's earlier focus sample must never
             // overwrite a newer foreground-window observation.
             self.synchronizeFocus()
             self.onChange?(result)
         }
+    }
+
+    /// Chromium child windows can report AXStandardWindow just like their
+    /// owner. AXMain writability distinguishes those non-main child controls;
+    /// a false current AXMain value alone would also hide background windows.
+    private func axCanBecomeMain(_ element: AXUIElement) -> Bool? {
+        var settable: DarwinBoolean = false
+        guard AXUIElementIsAttributeSettable(element, kAXMainAttribute as CFString, &settable) == .success else { return nil }
+        return settable.boolValue
     }
 
     func activate(_ record: WindowRecord, completion: @escaping (Bool) -> Void) {
