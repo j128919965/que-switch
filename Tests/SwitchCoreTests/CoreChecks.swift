@@ -200,6 +200,37 @@ private func expect<T: Equatable>(_ actual: T, _ expected: T, _ reason: String) 
             [.init(serverIndex: nil, accessibilityIndex: 0), .init(serverIndex: nil, accessibilityIndex: 1)],
             "Ambiguous geometry must never associate a screenshot with an arbitrary AX activation target")
         print("PASS: consistent AX eligibility, independent dialogs and ambiguous matches")
-        print("All 14 check groups passed.")
+        let relocatedFrame = CGRect(x: 80, y: 30, width: 1000, height: 740)
+        let unplugged = WindowInventory.reconcile(server: [.init(title: "Edge page", frame: relocatedFrame)],
+            accessibility: [browserWindows[0]])
+        try expect(unplugged, [.init(serverIndex: 0, accessibilityIndex: 0)],
+            "After display unplug, a uniquely titled real window must retain its live server ID despite stale AX geometry")
+        let edgeTitle = WindowInventory.AccessibilityWindow(title: "Edge page - Microsoft Edge", frame: browserFrame,
+            role: "AXWindow", subrole: "AXStandardWindow", canBecomeMain: true)
+        try expect(WindowInventory.reconcile(server: [.init(id: 100, title: "Edge page", frame: relocatedFrame)],
+            accessibility: [edgeTitle], applicationName: "Microsoft Edge"), unplugged,
+            "A recreated AX reference with Edge's app-name suffix must regain its screenshot ID without stale geometry")
+        let twins: [WindowInventory.AccessibilityWindow] = [
+            .init(title: "same tab", frame: browserFrame, role: "AXWindow", subrole: "AXStandardWindow", knownServerID: 100),
+            .init(title: "same tab", frame: relocatedFrame, role: "AXWindow", subrole: "AXStandardWindow", knownServerID: 200)
+        ]
+        let swapped = WindowInventory.reconcile(server: [.init(id: 200, title: "same tab", frame: browserFrame),
+            .init(id: 100, title: "same tab", frame: relocatedFrame)], accessibility: twins)
+        try expect(swapped, [.init(serverIndex: 0, accessibilityIndex: 1), .init(serverIndex: 1, accessibilityIndex: 0)],
+            "Confirmed IDs take precedence when same-title windows move into each other's old frames")
+        let staleChild = WindowInventory.AccessibilityWindow(title: "在页面上查找 - Microsoft Edge", frame: browserFrame,
+            role: "AXWindow", subrole: "AXStandardWindow", canBecomeMain: false)
+        try expect(WindowInventory.reconcile(server: [.init(title: "在页面上查找", frame: findFrame)],
+            accessibility: [staleChild], applicationName: "Microsoft Edge"), [],
+            "Title-based recovery cannot reintroduce the child find bar")
+        let duplicateServers: [WindowInventory.ServerWindow] = [
+            .init(title: "Edge page", frame: relocatedFrame), .init(title: "Edge page", frame: findFrame)
+        ]
+        try expect(WindowInventory.reconcile(server: duplicateServers, accessibility: [browserWindows[0]]),
+            [.init(serverIndex: nil, accessibilityIndex: 0)], "Nonunique server titles cannot invent a screenshot association")
+        try expect(DisplayGeometry.owner(of: relocatedFrame, displays: [displays[0]]), 1,
+            "A recovered window uses its current server frame on the remaining display")
+        print("PASS: window identity across display geometry changes")
+        print("All 15 check groups passed.")
     }
 }

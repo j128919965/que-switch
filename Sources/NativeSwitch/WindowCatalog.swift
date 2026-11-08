@@ -197,11 +197,12 @@ final class WindowCatalog {
                 ($0[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1 > 0
             }
             let axInfo = appWindows?.map { element in
-                (element: element, title: axValue(element, kAXTitleAttribute as CFString) as? String ?? "",
+                let old = previous.first { $0.pid == pid && $0.accessibilityElement.map { CFEqual($0, element) } == true }
+                return (element: element, title: axValue(element, kAXTitleAttribute as CFString) as? String ?? "",
                  frame: axFrame(element), minimized: axValue(element, kAXMinimizedAttribute as CFString) as? Bool ?? false,
                  role: axValue(element, kAXRoleAttribute as CFString) as? String,
                  subrole: axValue(element, kAXSubroleAttribute as CFString) as? String,
-                 canBecomeMain: axCanBecomeMain(element))
+                 canBecomeMain: axCanBecomeMain(element), old: old)
             }
             let server = cgWindows.compactMap { item -> (id: CGWindowID, title: String, frame: CGRect)? in
                 guard let id = (item[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
@@ -209,9 +210,10 @@ final class WindowCatalog {
                       let frame = CGRect(dictionaryRepresentation: bounds) else { return nil }
                 return (id, item[kCGWindowName as String] as? String ?? "", frame)
             }
-            let matches = WindowInventory.reconcile(server: server.map { .init(title: $0.title, frame: $0.frame) },
+            let matches = WindowInventory.reconcile(server: server.map { .init(id: $0.id, title: $0.title, frame: $0.frame) },
                 accessibility: axInfo?.map { .init(title: $0.title, frame: $0.frame, role: $0.role, subrole: $0.subrole,
-                    canBecomeMain: $0.canBecomeMain) })
+                    canBecomeMain: $0.canBecomeMain, knownServerID: $0.old?.windowID) },
+                applicationName: application.localizedName ?? "")
             if appWindows != nil {
                 let retained = Set(matches.compactMap(\.serverIndex))
                 for index in server.indices where !retained.contains(index) {
@@ -233,7 +235,7 @@ final class WindowCatalog {
                     continue
                 }
                 guard let candidate, let frame = candidate.frame else { continue }
-                let old = previous.first { $0.pid == pid && $0.accessibilityElement.map { CFEqual($0, candidate.element) } == true }
+                let old = candidate.old
                 let key = old?.key ?? WindowKey(pid: pid, token: "ax-\(CFHash(candidate.element))")
                 // A minimized/hidden window has no public Space ID. Keep its
                 // last known desktop membership; unknown ones appear only in
